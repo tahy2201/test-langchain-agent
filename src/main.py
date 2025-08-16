@@ -20,6 +20,22 @@ from prompt_toolkit.completion import WordCompleter
 load_dotenv()
 
 
+def validate_aws_credentials() -> tuple[bool, str]:
+    """AWS認証情報の検証"""
+    aws_access_key = os.getenv("AWS_ACCESS_KEY_ID")
+    aws_secret_key = os.getenv("AWS_SECRET_ACCESS_KEY")
+    
+    if not aws_access_key or not aws_secret_key:
+        return False, "❌ AWS認証情報が設定されていません。\n" \
+                     "環境変数 AWS_ACCESS_KEY_ID と AWS_SECRET_ACCESS_KEY を設定してください。"
+    
+    # 環境変数に設定（boto3が自動的に読み込む）
+    os.environ['AWS_ACCESS_KEY_ID'] = aws_access_key
+    os.environ['AWS_SECRET_ACCESS_KEY'] = aws_secret_key
+    
+    return True, ""
+
+
 class LangChainCLIAgent:
     """CLIベースのLangChainエージェント"""
     
@@ -27,6 +43,14 @@ class LangChainCLIAgent:
         """エージェントの初期化"""
         self.chat_history: List = []
         self.llm = self._initialize_llm()
+        
+        # AWS認証情報の確認
+        is_valid, error_message = validate_aws_credentials()
+        if not is_valid:
+            print("⚠️ AWS認証確認結果:")
+            print(error_message)
+            print("AWS機能（Python実行）は利用できませんが、他の機能は使用可能です。")
+        
         self.agent_executor = self._create_agent()
         
         # prompt_toolkitの設定

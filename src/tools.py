@@ -1,9 +1,19 @@
 """LangChainエージェント用のツール関数群"""
 import json
 from datetime import datetime
-from typing import Dict, Any, Optional
 from langchain.tools import tool
 from bedrock_agentcore.tools.code_interpreter_client import CodeInterpreter
+
+# Code Interpreterセッションの管理
+_CODE_INTERPRETER_CLIENT = None
+
+def _get_code_interpreter():
+    """共有Code Interpreterセッションを取得"""
+    global _CODE_INTERPRETER_CLIENT
+    if _CODE_INTERPRETER_CLIENT is None:
+        _CODE_INTERPRETER_CLIENT = CodeInterpreter('us-west-2')
+        _CODE_INTERPRETER_CLIENT.start()
+    return _CODE_INTERPRETER_CLIENT
 
 
 @tool
@@ -120,34 +130,19 @@ def create_todo_item(task: str, priority: str = "medium") -> str:
 
 
 @tool
-def execute_python_code(code: str, description: str = "") -> str:
+def execute_python_code(code: str) -> str:
     """AWS Code Interpreterを使用してPythonコードを実行し、結果を返す関数
     
     Args:
         code: 実行したいPythonコード
-        description: コードの説明（オプション）
     
     Returns:
         str: コード実行結果の文字列
     """
-    import os
-    
     try:
-        # AWS認証情報の確認
-        aws_access_key = os.getenv("AWS_ACCESS_KEY_ID")
-        aws_secret_key = os.getenv("AWS_SECRET_ACCESS_KEY")
         
-        if not aws_access_key or not aws_secret_key:
-            return "❌ AWS認証情報が設定されていません。\n" \
-                   "環境変数 AWS_ACCESS_KEY_ID と AWS_SECRET_ACCESS_KEY を設定してください。"
-        
-        # AWS認証情報を環境変数に設定（boto3が自動的に読み込む）
-        os.environ['AWS_ACCESS_KEY_ID'] = aws_access_key
-        os.environ['AWS_SECRET_ACCESS_KEY'] = aws_secret_key
-        
-        # Code Interpreterクライアントの初期化
-        code_client = CodeInterpreter('us-west-2')
-        code_client.start()
+        # 共有Code Interpreterセッションを取得
+        code_client = _get_code_interpreter()
         
         # コードの実行
         response = code_client.invoke("executeCode", {
@@ -180,7 +175,7 @@ def execute_python_code(code: str, description: str = "") -> str:
                     errors.append(stderr.strip())
         
         # クリーンアップ
-        code_client.stop()
+        # セッションは共有なので停止しない
         
         # 結果をシンプルに返す（Claudeが適切に解釈するため）
         if outputs:
@@ -195,6 +190,180 @@ def execute_python_code(code: str, description: str = "") -> str:
                f"実行しようとしたコード:\n```python\n{code}\n```"
 
 
+@tool  
+def list_code_interpreter_files() -> str:
+    """Code Interpreterセッション内のファイル一覧を表示する関数
+    
+    Returns:
+        str: ファイル一覧の文字列
+    """
+    try:
+        # 共有Code Interpreterセッションを取得
+        code_client = _get_code_interpreter()
+        
+        # executeCodeでファイル一覧取得（より確実）
+        list_code = """
+import os
+import datetime
+
+# カレントディレクトリのファイル一覧を取得
+files = os.listdir('.')
+
+print("📁 Code Interpreterセッション内のファイル:")
+if not files:
+    print("ファイルが見つかりませんでした。")
+else:
+    for filename in sorted(files):
+        if os.path.isfile(filename):
+            file_size = os.path.getsize(filename)
+            mod_time = datetime.datetime.fromtimestamp(os.path.getmtime(filename))
+            print(f"📄 {filename} ({file_size} bytes, 更新: {mod_time.strftime('%Y-%m-%d %H:%M:%S')})")
+        elif os.path.isdir(filename):
+            print(f"📁 {filename}/ (ディレクトリ)")
+"""
+        
+        response = code_client.invoke("executeCode", {
+            "language": "python",
+            "code": list_code
+        })
+        
+        # 実行結果を取得
+        for event in response["stream"]:
+            if "result" in event:
+                result_data = event["result"]
+                if "structuredContent" in result_data:
+                    stdout = result_data["structuredContent"].get("stdout", "")
+                    if stdout:
+                        return stdout.strip()
+        
+        return "ファイル一覧の取得に失敗しました。"
+            
+    except Exception as e:
+        return f"ファイル一覧取得エラー: {str(e)}"
+
+
+@tool
+def save_file_to_code_interpreter(file_path: str, content: str) -> str:
+    """Code Interpreterセッションにファイルを保存する関数（executeCode使用）
+    
+    Args:
+        file_path: 保存するファイルのパス
+        content: ファイルの内容
+        
+    Returns:
+        str: 保存結果
+    """
+    try:
+        # 共有Code Interpreterセッションを取得
+        code_client = _get_code_interpreter()
+        
+        # executeCodeでファイル保存（より確実）
+        save_code = f"""
+import os
+# ファイルを保存
+with open('{file_path}', 'w', encoding='utf-8') as f:
+    f.write('''{content}''')
+
+# 保存確認
+if os.path.exists('{file_path}'):
+    file_size = os.path.getsize('{file_path}')
+    print(f"✅ ファイル '{file_path}' を保存しました（サイズ: {{file_size}} bytes）")
+else:
+    print(f"❌ ファイル '{file_path}' の保存に失敗しました")
+"""
+        
+        response = code_client.invoke("executeCode", {
+            "language": "python",
+            "code": save_code
+        })
+        
+        # 実行結果を取得
+        for event in response["stream"]:
+            if "result" in event:
+                result_data = event["result"]
+                if "structuredContent" in result_data:
+                    stdout = result_data["structuredContent"].get("stdout", "")
+                    if stdout:
+                        return stdout.strip()
+        
+        return f"✅ ファイル '{file_path}' を保存しました"
+        
+    except Exception as e:
+        return f"ファイル保存エラー: {str(e)}"
+
+
+@tool
+def download_code_interpreter_file(file_path: str) -> str:
+    """Code Interpreterセッション内のファイルをダウンロードして内容を表示する関数（executeCode使用）
+    
+    Args:
+        file_path: ダウンロードしたいファイルのパス
+        
+    Returns:
+        str: ファイル内容またはダウンロード結果
+    """
+    try:
+        # 共有Code Interpreterセッションを取得
+        code_client = _get_code_interpreter()
+        
+        # executeCodeでファイル読み取り（より確実）
+        read_code = f"""
+import os
+
+file_path = '{file_path}'
+
+# ファイルの存在確認
+if not os.path.exists(file_path):
+    print(f"❌ ファイル '{{file_path}}' が見つかりませんでした。")
+else:
+    # ファイルサイズを確認
+    file_size = os.path.getsize(file_path)
+    print(f"📄 ファイル '{{file_path}}' の内容 ({{file_size}} bytes):")
+    print("-" * 50)
+    
+    # テキストファイルとして読み取り試行
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+            if len(content) > 2000:
+                print(content[:2000])
+                print(f"\\n... (残り {{len(content) - 2000}} 文字)")
+            else:
+                print(content)
+    except UnicodeDecodeError:
+        # バイナリファイルの場合
+        print("(バイナリファイルのため内容を表示できません)")
+        
+        # 画像ファイルの場合はbase64で出力
+        if file_path.endswith(('.png', '.jpg', '.jpeg', '.gif')):
+            import base64
+            with open(file_path, 'rb') as f:
+                content = f.read()
+                encoded = base64.b64encode(content).decode('utf-8')
+                print(f"Base64エンコード済み画像データ ({{len(encoded)}} 文字):")
+                print(encoded[:100] + "..." if len(encoded) > 100 else encoded)
+"""
+        
+        response = code_client.invoke("executeCode", {
+            "language": "python",
+            "code": read_code
+        })
+        
+        # 実行結果を取得
+        for event in response["stream"]:
+            if "result" in event:
+                result_data = event["result"]
+                if "structuredContent" in result_data:
+                    stdout = result_data["structuredContent"].get("stdout", "")
+                    if stdout:
+                        return stdout.strip()
+        
+        return f"❌ ファイル '{file_path}' の読み取りに失敗しました。"
+        
+    except Exception as e:
+        return f"ファイルダウンロードエラー: {str(e)}"
+
+
 def get_available_tools():
     """利用可能なツール一覧を取得"""
     return [
@@ -202,4 +371,7 @@ def get_available_tools():
         calculate_math_expression,
         create_todo_item,
         execute_python_code,
+        list_code_interpreter_files,
+        save_file_to_code_interpreter,
+        download_code_interpreter_file
     ]
